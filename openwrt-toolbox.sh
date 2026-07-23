@@ -223,27 +223,45 @@ download_to_file() {
 
 resolve_proton_asset_url() {
     case "$PKG_MANAGER" in
-        apk) extension=".apk" ;;
-        opkg) extension=".ipk" ;;
+        apk) extension="apk" ;;
+        opkg) extension="ipk" ;;
         *) return 1 ;;
     esac
 
+    if ! command -v jsonfilter >/dev/null 2>&1; then
+        log_error "Не найден jsonfilter, необходимый для разбора ответа GitHub API."
+        return 1
+    fi
+
     release_json="$WORK_DIR/proton-release.json"
+    asset_urls="$WORK_DIR/proton-assets.txt"
     release_api="https://api.github.com/repos/$PROTON_REPOSITORY/releases/latest"
+
     download_to_file "$release_api" "$release_json" || {
         log_error "Не удалось получить данные актуального релиза Proton 2025."
         return 1
     }
 
-    urls=$(
-        sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\)".*/\1/p' "$release_json" |
-            grep "/${PROTON_PACKAGE}[^/]*${extension}$" || true
-    )
-    count=$(printf '%s\n' "$urls" | sed '/^$/d' | wc -l | tr -d ' ')
-    if [ "$count" != "1" ]; then
-        log_error "Ожидался один пакет Proton 2025 ${extension}, найдено: $count."
+    if ! jsonfilter -q -i "$release_json" \
+        -e '@.assets[*].browser_download_url' >"$asset_urls"; then
+        log_error "GitHub API вернул некорректный JSON."
         return 1
     fi
+
+    urls=$(
+        grep "/${PROTON_PACKAGE}[^/]*\.${extension}$" "$asset_urls" || true
+    )
+    count=$(printf '%s\n' "$urls" | sed '/^$/d' | wc -l | tr -d ' ')
+
+    if [ "$count" != "1" ]; then
+        log_error "Ожидался один пакет Proton 2025 .${extension}, найдено: $count."
+        if [ -s "$asset_urls" ]; then
+            log_warn "Ссылки, найденные в актуальном релизе:"
+            sed 's/^/  - /' "$asset_urls" >&2
+        fi
+        return 1
+    fi
+
     printf '%s\n' "$urls"
 }
 
@@ -261,10 +279,8 @@ install_proton() {
     fi
     log_info "Поиск актуального пакета Proton 2025..."
     asset_url=$(resolve_proton_asset_url) || return 1
-    case "$PKG_MANAGER" in
-        apk) package_file="$WORK_DIR/$PROTON_PACKAGE.apk" ;;
-        opkg) package_file="$WORK_DIR/$PROTON_PACKAGE.ipk" ;;
-    esac
+    asset_name=${asset_url##*/}
+    package_file="$WORK_DIR/$asset_name"
     download_to_file "$asset_url" "$package_file" || {
         log_error "Не удалось скачать пакет Proton 2025."
         return 1
